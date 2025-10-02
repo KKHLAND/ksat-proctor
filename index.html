@@ -202,7 +202,7 @@
             `;
 
             win.document.write(`<html><head><title>최종 감독 시간표 인쇄</title>${styles}</head><body>`);
-            win.document.write(`<div class="print-title"><h1>${examInfo.year}학년도 대학수학능력시험 시험실 감독관 명단</h1><p>제 ${examInfo.district} 시험지구 (${examInfo.center})시험장 (${examInfo.school})</p></div>`);
+            win.document.write(`<div class="print-title"><h1>${examInfo.year}학년도 대학수학능력시험 감독 시간표</h1><p>제 ${examInfo.district} 시험지구 (${examInfo.center})시험장 (${examInfo.school})</p></div>`);
             win.document.write(tableHTML);
             win.document.write('</body></html>');
             win.document.close();
