@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI 시험 감독관 배정 시스템</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom Styles */
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: #f1f1f1; border-radius: 10px; }
+        ::-webkit-scrollbar-thumb { background: #888; border-radius: 10px; }
+        ::-webkit-scrollbar-thumb:hover { background: #555; }
+        .dragging { opacity: 0.5; cursor: grabbing; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.2); }
+        .drop-target { outline: 2px dashed #3b82f6; outline-offset: -2px; }
+        .no-select { user-select: none; -webkit-user-select: none; }
+        .animate-fade-in { animation: fadeIn 0.5s ease-in-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+        /* Print Styles */
+        @media print {
+            body { font-family: 'Malgun Gothic', sans-serif; }
+            header, main > div:first-of-type, .screen-only { display: none !important; }
+            .print-container { padding: 0 !important; margin: 0 !important; box-shadow: none !important; border: none !important; }
+            .overflow-x-auto { overflow: visible !important; }
+            table { width: 100%; border-collapse: collapse; -webkit-print-color-adjust: exact !important; color-adjust: exact !important; }
+            th, td { border: 1px solid #d1d5db !important; padding: 0 !important; text-align: center !important; vertical-align: middle !important; white-space: nowrap !important; }
+            thead { display: table-header-group; }
+            th { font-weight: bold !important; font-size: 9pt !important; background-color: #f9fafb !important; padding: 2px 4px !important; }
+            tr, td { background-color: transparent !important; }
+            tbody tr td:first-child { font-weight: bold !important; font-size: 9pt !important; background-color: #f9fafb !important; }
+            .proctor-cell { -webkit-print-color-adjust: exact !important; color-adjust: exact !important; border-radius: 0.125rem !important; border-width: 1px !important; box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05) !important; padding: 4px 0 !important; }
+            .font-bold { font-weight: 700 !important; font-size: 8pt !important; }
+            .text-xs { font-size: 7pt !important; }
+            .leading-tight { line-height: 1.25 !important; }
+            button { display: none !important; }
+            @page { size: A4 landscape; margin: 0.8cm; }
+        }
+    </style>
+</head>
+<body class="bg-gray-100 text-gray-800">
+    <div id="root"></div>
+
+    <script type="module">
+        // --- Enums, Types, and Global State ---
+        const SchoolLevel = { High: '고', Middle: '중', Unknown: '알수없음' };
+        const Gender = { Male: '남', Female: '여', Unknown: '알수없음' };
+        const AppStep = { InitialSetup: 0, Upload: 1, Setup: 2, ManualAssignment: 3, Result: 4 };
+
+        let state = {
+            step: AppStep.InitialSetup,
+            examInfo: { year: String(new Date().getFullYear() + 1), district: '', center: '', school: '' },
+            proctors: [], examRooms: [], schedule: null,
+            isLoading: false, generationLogs: [],
+            proctorSearchTerm: '', proctorSortKey: 'birthYear', proctorSortDirection: 'asc',
+            manualSearchTerm: '', manualSortKey: 'schoolLevel', manualSortDirection: 'asc',
+            highlightType: 'none', highlightedCells: new Set(),
+            draggedItem: null, isModalOpen: false, targetSlot: null,
+        };
+        
+        let proctorFile = null; let roomFile = null;
+
+        // --- Core App Logic: setState and render ---
+        function setState(newState) { state = { ...state, ...newState }; render(); }
+        function render() {
+            const root = document.getElementById('root');
+            root.innerHTML = `<div id="app-container">${Header()}<main class="p-4 sm:p-6 lg:p-8 max-w-screen-2xl mx-auto pt-0">${ProgressTracker()}<div id="step-container"></div></main></div>`;
+            
+            const stepContainer = document.getElementById('step-container');
+            let currentStepHtml = '';
+            switch (state.step) {
+                case AppStep.InitialSetup: currentStepHtml = InitialSetupStep(); break;
+                case AppStep.Upload: currentStepHtml = FileUploadStep(); break;
+                case AppStep.Setup: currentStepHtml = ProctorSetupStep(); break;
+                case AppStep.ManualAssignment: currentStepHtml = ManualAssignmentStep(); break;
+                case AppStep.Result: currentStepHtml = ScheduleResultStep(); break;
+                default: currentStepHtml = `<div>Error: Invalid Step</div>`;
+            }
+            stepContainer.innerHTML = currentStepHtml;
+            attachEventListeners();
+        }
+        
+        const Icons = {
+            Spinner: `<svg class="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>`,
+            UserGroupIcon: (cn) => `<svg class="${cn}" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" /></svg>`,
+            BuildingIcon: (cn) => `<svg class="${cn}" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 21h16.5M4.5 3h15M5.25 3v18m13.5-18v18M9 6.75h6M9 11.25h6M9 15.75h6" /></svg>`,
+            CheckCircleIcon: (cn) => `<svg class="${cn}" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>`,
+            DownloadIcon: (cn) => `<svg class="${cn}" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>`,
+            RefreshIcon: (cn) => `<svg class="${cn}" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 15L3 9m0 0l6-6M3 9h12a6 6 0 010 12h-3" /></svg>`,
+            PrinterIcon: (cn) => `<svg class="${cn}" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" /></svg>`,
+            RegenerateIcon: (cn) => `<svg class="${cn}" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0011.664 0l3.181-3.183m-4.991-2.695v4.992h-4.992m0 0l-3.181-3.183a8.25 8.25 0 0111.664 0l3.181 3.183" /></svg>`,
+            ChevronLeftIcon: (cn) => `<svg class="${cn}" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" /></svg>`,
+            ChevronUpIcon: (cn) => `<svg class="${cn}" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 15.75l7.5-7.5 7.5 7.5" /></svg>`,
+            ChevronDownIcon: (cn) => `<svg class="${cn}" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" /></svg>`,
+            TableIcon: (cn) => `<svg class="${cn}" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h18M3 14h18M3 6h18M9 20h6M3 20h.01M21 20h-.01" /></svg>`,
+        };
+
+        // --- Layout & Step Components ---
+        function Header() { return `<header><div class="max-w-screen-2xl mx-auto p-4 sm:p-6 lg:p-8"><div class="bg-gradient-to-r from-blue-700 to-blue-900 shadow-lg text-white rounded-lg py-4 px-4 sm:px-6 lg:px-8 flex items-center justify-between"><div class="flex items-center"><svg class="h-10 w-10 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg><h1 class="text-3xl font-bold ml-4">수능 시험 감독관 배정 시스템</h1></div><p class="text-sm text-blue-200 hidden md:block">Automated, Fair, and Efficient Exam Proctoring</p></div></div></header>`; }
+        function ProgressTracker() { const { step } = state; const progress = (step / (Object.keys(AppStep).length -1)) * 100; const steps = ["1. 정보 입력", "2. 데이터 업로드", "3. 설정", "4. 수동 배정", "5. 검토 및 내보내기"]; return `<div class="w-full bg-white rounded-lg shadow-md p-4 mb-6"><h2 class="text-lg font-semibold text-gray-700 mb-2">진행률 (Progress)</h2><div class="relative pt-1"><div class="overflow-hidden h-4 mb-4 text-xs flex rounded bg-blue-200"><div style="width: ${progress}%" class="shadow-none flex flex-col text-center whitespace-nowrap text-white justify-center bg-blue-500 transition-all duration-500"></div></div></div><div class="flex flex-wrap justify-between text-sm font-medium text-gray-600">${steps.map((s, i) => `<span class="${step === i ? 'text-blue-600 font-bold' : ''}">${s}</span>`).join('')}</div></div>`; }
+        function GenerationLogBox() { return state.isLoading && state.generationLogs.length > 0 ? `<div class="my-4 p-4 bg-gray-100 rounded-md max-h-40 overflow-y-auto"><h4 class="font-semibold text-gray-700 mb-2">알고리즘 진행률:</h4><ul class="text-xs text-gray-600 space-y-1">${state.generationLogs.slice(-10).map((log) => `<li>Gen ${log.generation}: Best Score = ${log.bestScore.toFixed(0)}</li>`).join('')}</ul></div>` : ''; }
+        function InitialSetupStep() { const { examInfo: info } = state; const isFormValid = Object.values(info).every(Boolean); return `<div class="bg-white p-8 rounded-lg shadow-lg max-w-4xl mx-auto animate-fade-in"><h2 class="text-2xl font-bold text-center text-gray-800 mb-6">시험 정보 입력</h2><div class="p-3 mb-6 bg-red-50 text-red-800 rounded-lg text-sm text-center"><strong>주의:</strong> 모든 시험 정보를 입력해야 다음 단계로 진행할 수 있습니다.</div><div class="flex flex-wrap items-center justify-center gap-x-4 gap-y-6 p-4 bg-gray-50 rounded-lg"><div class="flex items-center"><input type="text" name="year" value="${info.year}" class="w-24 p-2 text-center border rounded-md" placeholder="2025" /><span class="ml-2 font-semibold">학년도,</span></div><div class="flex items-center"><span class="mr-2 font-semibold">제</span><input type="text" name="district" value="${info.district}" class="w-20 p-2 text-center border" placeholder="11" /><span class="ml-2 font-semibold">시험지구,</span></div><div class="flex items-center"><input type="text" name="center" value="${info.center}" class="w-20 p-2 text-center border" placeholder="7" /><span class="ml-2 font-semibold">시험장,</span></div><div class="flex items-center"><span class="mr-2 font-semibold">학교명</span><input type="text" name="school" value="${info.school}" class="w-40 p-2 text-center border" placeholder="원묵고등학교" /></div></div><div class="mt-8 text-center"><button id="setup-complete-btn" ${!isFormValid ? 'disabled' : ''} class="w-full md:w-auto bg-blue-600 text-white font-bold py-3 px-12 rounded-lg hover:bg-blue-700 disabled:bg-gray-400">다음: 파일 업로드</button></div></div>`; }
+        function FileUploadStep() { const fileCard = (id, title, icon, file) => `<div id="${id}-card" class="bg-gray-50 rounded-lg p-6 border-2 ${file ? 'border-green-400' : 'border-dashed border-gray-300'} text-center cursor-pointer hover:shadow-md"><input type="file" accept=".csv" id="${id}-input" class="hidden"/><div class="mx-auto rounded-full w-16 h-16 flex items-center justify-center mb-4 border-2 ${file ? 'bg-green-100' : 'bg-white'}">${file ? Icons.CheckCircleIcon('h-8 w-8 text-green-500') : icon}</div><h3 class="font-semibold">${title}</h3><p class="text-sm text-gray-500 mb-2">${title} CSV</p>${file ? `<p class="mt-1 text-xs font-medium text-green-700 truncate">${file.name}</p>` : `<p class="mt-1 text-xs text-blue-500 font-semibold">파일 선택</p>`}</div>`; return `<div class="bg-white p-8 rounded-xl shadow-lg max-w-4xl mx-auto animate-fade-in"><div class="text-center"><h2 class="text-2xl font-bold mb-2">데이터 파일 업로드</h2><p class="text-gray-500 mb-8">감독교사 명단과 고사실 정보 CSV 파일을 업로드해주세요.</p></div><div class="grid grid-cols-1 md:grid-cols-2 gap-6">${fileCard('proctor', '감독교사 명단', Icons.UserGroupIcon('h-8 w-8 text-gray-500'), proctorFile)}${fileCard('room', '고사실 정보', Icons.BuildingIcon('h-8 w-8 text-gray-500'), roomFile)}</div><div class="mt-10 flex flex-col md:flex-row items-center justify-center gap-4"><button id="back-btn" class="w-full md:w-auto bg-gray-500 text-white font-bold py-3 px-12 rounded-lg hover:bg-gray-600">이전</button><button id="files-upload-btn" ${!proctorFile || !roomFile || state.isLoading ? 'disabled' : ''} class="w-full md:w-auto bg-blue-600 text-white font-bold py-3 px-12 rounded-lg hover:bg-blue-700 disabled:bg-gray-400 flex items-center justify-center">${state.isLoading ? `${Icons.Spinner} 처리 중...` : '다음: 감독관 설정'}</button></div></div>`; }
+        function ProctorSetupStep() { const { proctors, examRooms, proctorSearchTerm, proctorSortKey, proctorSortDirection } = state; const totalSlots = examRooms.reduce((s, r) => s + r.requiredProctors.reduce((a, v) => a + v, 0), 0); const totalTarget = proctors.reduce((s, p) => s + p.targetSessions, 0); const proctorList = [...proctors].filter(p => p.name.toLowerCase().includes(proctorSearchTerm.toLowerCase()) || p.school.toLowerCase().includes(proctorSearchTerm.toLowerCase())).sort((a, b) => { let vA = a[proctorSortKey]; let vB = b[proctorSortKey]; if (vA < vB) return proctorSortDirection === 'asc' ? -1 : 1; if (vA > vB) return proctorSortDirection === 'asc' ? 1 : -1; return 0; }); const Header = (lbl, key) => `<th class="p-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider cursor-pointer" data-sortkey="${key}"><div class="flex items-center">${lbl}${proctorSortKey === key ? (proctorSortDirection === 'asc' ? Icons.ChevronUpIcon('h-4 w-4 ml-1') : Icons.ChevronDownIcon('h-4 w-4 ml-1')) : ''}</div></th>`; return `<div class="bg-white p-6 rounded-lg shadow-lg animate-fade-in"><h2 class="text-2xl font-bold mb-4">감독관 설정</h2><div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6"><div class="bg-blue-50 p-4 rounded-lg flex items-center">${Icons.UserGroupIcon('h-8 w-8 text-blue-500 mr-4')}<div><p class="text-sm">총 감독관</p><p class="text-2xl font-bold">${proctors.length}</p></div></div><div class="bg-green-50 p-4 rounded-lg flex items-center">${Icons.TableIcon('h-8 w-8 text-green-500 mr-4')}<div><p class="text-sm">총 필요 감독 수</p><p class="text-2xl font-bold">${totalSlots}</p></div></div><div class="p-4 rounded-lg flex items-center ${totalTarget === totalSlots ? 'bg-green-50' : 'bg-red-50'}"><div><p class="text-sm">총 목표 감독 시간</p><p class="text-2xl font-bold ${totalTarget === totalSlots ? '' : 'text-red-600'}">${totalTarget}</p></div></div></div><div class="mb-4"><input type="text" id="proctor-search" placeholder="이름 또는 학교로 검색..." value="${proctorSearchTerm}" class="w-full p-2 border rounded-md"></div><div class="overflow-x-auto max-h-[50vh]"><table class="min-w-full bg-white divide-y"><thead class="bg-gray-50 sticky top-0"><tr>${Header('ID', 'id')}${Header('이름', 'name')}${Header('소속교', 'school')}${Header('출생년도', 'birthYear')}${Header('성별', 'gender')}<th class="p-3 text-left text-xs font-semibold uppercase">목표 시수</th></tr></thead><tbody class="divide-y">${proctorList.map(p => `<tr><td class="p-3 text-sm">${p.id}</td><td class="p-3 text-sm font-medium">${p.name}</td><td class="p-3 text-sm">${p.school}</td><td class="p-3 text-sm">${p.birthYear}</td><td class="p-3 text-sm">${p.gender}</td><td class="p-3"><input type="number" data-id="${p.id}" data-field="targetSessions" value="${p.targetSessions}" class="w-20 p-1 border rounded-md text-center proctor-update-input"></td></tr>`).join('')}</tbody></table></div><div class="mt-6 flex flex-col md:flex-row items-center justify-center gap-4"><button id="back-btn" class="w-full md:w-auto bg-gray-500 text-white font-bold py-3 px-12 rounded-lg hover:bg-gray-600">이전</button><button id="next-btn" class="w-full md:w-auto bg-blue-600 text-white font-bold py-3 px-12 rounded-lg hover:bg-blue-700">다음: 수동 배정</button></div></div>`; }
+        function ManualAssignmentStep() { const { proctors, examRooms, manualSearchTerm, manualSortKey, manualSortDirection } = state; const periodDurations = { 1: 80, 2: 70, 3: 100, 4: 107, 5: 40 }; const activePeriods = Array.from(new Set(examRooms.flatMap(r => r.requiredProctors.map((c, i) => c > 0 ? i + 1 : 0).filter(Boolean)))).sort(); const roleCounts = activePeriods.reduce((acc, p) => ({ ...acc, [p]: { head: 0, asst: 0, headAssigned: 0, asstAssigned: 0 } }), {}); examRooms.forEach(r => r.requiredProctors.forEach((count, i) => { const p = i + 1; if (roleCounts[p] && count > 0) { roleCounts[p].head += 1; roleCounts[p].asst += count - 1; } })); proctors.forEach(pr => pr.manualAssignments.forEach(a => { if (roleCounts[a.period]) { if (a.position === 1) roleCounts[a.period].headAssigned++; else roleCounts[a.period].asstAssigned++; } })); const proctorList = [...proctors].filter(p => p.name.toLowerCase().includes(manualSearchTerm.toLowerCase()) || p.school.toLowerCase().includes(manualSearchTerm.toLowerCase())).sort((a, b) => { let valA, valB; if (manualSortKey === 'sessions') { valA = a.manualAssignments.length; valB = b.manualAssignments.length; } else { valA = a[manualSortKey]; valB = b[manualSortKey]; } if (valA < valB) return manualSortDirection === 'asc' ? -1 : 1; if (valA > valB) return manualSortDirection === 'asc' ? 1 : -1; return a.schoolLevel.localeCompare(b.schoolLevel) || a.birthYear - b.birthYear; }); const Header = (lbl, key, cn, rs=1) => `<th rowspan="${rs}" class="p-2 text-xs font-semibold uppercase tracking-wider cursor-pointer sticky bg-gray-100 ${cn}" data-sortkey="${key}"><div class="flex items-center justify-center">${lbl}${manualSortKey === key ? (manualSortDirection === 'asc' ? Icons.ChevronUpIcon('h-4 w-4 inline') : Icons.ChevronDownIcon('h-4 w-4 inline')) : ''}</div></th>`; return `<div class="bg-white p-6 rounded-lg shadow-lg animate-fade-in"><h2 class="text-2xl font-bold mb-4">수동 배정</h2><p class="text-gray-600 mb-4">감독을 배정할 교시와 역할을 직접 선택해주세요. 여기서 선택한 대로 각 교사의 감독 횟수(목표 시수)가 설정됩니다.</p><div class="mb-4"><input type="text" id="manual-search" placeholder="이름 또는 학교로 검색..." value="${manualSearchTerm}" class="w-full p-2 border rounded-md"></div><div class="overflow-auto max-h-[60vh] border rounded-lg"><table class="min-w-full bg-white text-sm table-fixed"><thead class="bg-gray-100 sticky top-0 z-10 text-center"><tr>${Header('ID','id','left-0 z-20 w-[50px]',2)}${Header('이름','name','left-[50px] z-20 w-[80px]',2)}${Header('소속교','school','left-[130px] z-20 w-[100px]',2)}${Header('출생년도','birthYear','left-[230px] z-20 w-[60px]',2)}${Header('시수','sessions','left-[290px] z-20 w-[60px]',2)}${activePeriods.map(p => `<th colspan="2" class="p-2 text-xs font-semibold uppercase border-l w-28">${p}교시(${periodDurations[p]}분)</th>`).join('')}</tr><tr>${activePeriods.map(p => { const r = roleCounts[p]; return `<th class="p-1 text-xs font-semibold text-gray-500 border-l ${r.headAssigned > r.head ? 'text-red-500' : ''}">1감독<br>(${r.headAssigned}/${r.head})</th><th class="p-1 text-xs font-semibold text-gray-500 ${r.asstAssigned > r.asst ? 'text-red-500' : ''}">2,3감독<br>(${r.asstAssigned}/${r.asst})</th>`; }).join('')}</tr></thead><tbody class="divide-y">${proctorList.map(p => `<tr><td class="p-2 sticky left-0 bg-white text-center">${p.id}</td><td class="p-2 sticky left-[50px] bg-white">${p.name}</td><td class="p-2 sticky left-[130px] bg-white truncate">${p.school}</td><td class="p-2 sticky left-[230px] bg-white text-center">${p.birthYear}</td><td class="p-2 sticky left-[290px] bg-white font-bold text-center">${p.manualAssignments.length}</td>${activePeriods.map(period => { const isHead = p.manualAssignments.some(a => a.period === period && a.position === 1); const isAsst = p.manualAssignments.some(a => a.period === period && a.position > 1); return `<td class="p-1 text-center border-l"><div data-id="${p.id}" data-period="${period}" data-pos="1" class="w-full h-8 flex items-center justify-center rounded cursor-pointer font-bold transition-colors ${isHead ? 'bg-blue-200 text-blue-800' : 'hover:bg-gray-200'}">${isHead ? '1감독' : ''}</div></td><td class="p-1 text-center"><div data-id="${p.id}" data-period="${period}" data-pos="2" class="w-full h-8 flex items-center justify-center rounded cursor-pointer font-bold transition-colors ${isAsst ? 'bg-indigo-200 text-indigo-800' : 'hover:bg-gray-200'}">${isAsst ? '2,3감독' : ''}</div></td>`; }).join('')}</tr>`).join('')}</tbody></table></div><div class="mt-6 flex flex-col md:flex-row items-center justify-center gap-4"><button id="back-btn" class="w-full md:w-auto bg-gray-500 text-white font-bold py-3 px-12 rounded-lg hover:bg-gray-600">이전</button><button id="generate-btn" ${state.isLoading ? 'disabled' : ''} class="w-full md:w-auto bg-green-600 text-white font-bold py-3 px-12 rounded-lg hover:bg-green-700 disabled:bg-gray-400 flex items-center justify-center">${state.isLoading ? `${Icons.Spinner} 생성 중...` : '시간표 생성'}</button></div>${GenerationLogBox()}</div>`; }
+        function ScheduleResultStep() { return `<div class="print-container bg-white p-6 rounded-lg shadow-lg animate-fade-in">${ProctorSelectionModal()}<div class="flex flex-wrap items-center justify-between gap-4 mb-6 screen-only"><h2 class="text-2xl font-bold">최종 감독 시간표</h2><div class="flex flex-wrap items-center gap-3"><button id="back-btn" class="bg-gray-500 text-white font-semibold py-2 px-4 rounded-lg flex items-center">${Icons.ChevronLeftIcon('h-5 w-5 mr-2')} 이전</button><button id="highlight-pair-btn" class="font-semibold py-2 px-4 rounded-lg flex items-center ${state.highlightType === 'pair' ? 'bg-red-500 text-white' : 'bg-purple-100 hover:bg-purple-200'}">같은 교사 조합</button><button id="highlight-room-btn" class="font-semibold py-2 px-4 rounded-lg flex items-center ${state.highlightType === 'room' ? 'bg-red-500 text-white' : 'bg-indigo-100 hover:bg-indigo-200'}">동일 고사실 배정</button><button id="regenerate-btn" ${state.isLoading ? 'disabled' : ''} class="bg-orange-500 text-white font-semibold py-2 px-4 rounded-lg hover:bg-orange-600 flex items-center disabled:bg-gray-400">${Icons.RegenerateIcon('h-5 w-5 mr-2')} 자동 재배정</button><button id="reset-btn" class="bg-yellow-500 text-white font-semibold py-2 px-4 rounded-lg hover:bg-yellow-600 flex items-center">${Icons.RefreshIcon('h-5 w-5 mr-2')} 처음부터</button><button id="print-btn" class="bg-blue-600 text-white font-semibold py-2 px-4 rounded-lg hover:bg-blue-700 flex items-center">${Icons.PrinterIcon('h-5 w-5 mr-2')} 인쇄</button><button id="export-btn" class="bg-green-600 text-white font-semibold py-2 px-4 rounded-lg hover:bg-green-700 flex items-center">${Icons.DownloadIcon('h-5 w-5 mr-2')} CSV 내보내기</button></div></div>${state.isLoading ? `<div class="my-6 p-4 bg-gray-100 rounded-md screen-only"><div class="flex items-center justify-center">${Icons.Spinner.replace('text-white', 'text-gray-700')} <span class="ml-2 font-semibold">새로운 시간표를 생성 중입니다...</span></div>${GenerationLogBox()}</div>` : ''}<div class="overflow-x-auto">${ScheduleTable()}</div><p class="text-center text-sm text-gray-500 mt-4 screen-only">💡 팁: 같은 교시 내에서 감독관을 드래그 앤 드롭하여 위치를 바꾸거나 교환할 수 있습니다. 빈칸을 클릭하면 새로운 감독관을 배정할 수 있습니다.</p></div>`; }
+        function ScheduleTable() { const { schedule, proctors, examRooms, highlightedCells } = state; if (!schedule) return '<p>생성된 시간표가 없습니다.</p>'; const proctorMap = new Map(proctors.map(p => [p.id, p])); const activePeriods = Array.from(new Set(examRooms.flatMap(r => r.requiredProctors.map((c, i) => c > 0 ? i + 1 : 0).filter(Boolean)))).sort(); const hasThirdProctor4 = examRooms.some(r => r.requiredProctors[3] > 2); return `<table class="min-w-full border-collapse border-gray-300"><thead><tr><th rowspan="2" class="p-2 border border-gray-300 font-semibold bg-gray-50 whitespace-nowrap text-sm">고사실</th>${activePeriods.map(p => `<th colspan="${p === 4 && hasThirdProctor4 ? 3 : 2}" class="p-2 border border-gray-300 font-semibold whitespace-nowrap text-sm ${p % 2 === 0 ? 'bg-slate-200' : 'bg-slate-50'}">${p}교시</th>`).join('')}</tr><tr>${activePeriods.map(p => Array.from({ length: p === 4 && hasThirdProctor4 ? 3 : 2 }, (_, i) => `<th class="p-2 border border-gray-300 font-semibold whitespace-nowrap text-sm ${p % 2 === 0 ? 'bg-slate-200' : 'bg-slate-50'}">제${i + 1}감독관</th>`).join('')).join('')}</tr></thead><tbody>${examRooms.map(room => `<tr class="hover:bg-yellow-50"><td class="p-2 border border-gray-300 font-medium text-center bg-gray-50 whitespace-nowrap text-sm">${room.name}</td>${activePeriods.map(period => { const key = `${period}:${room.name}`; const assignments = schedule.get(key) || []; return Array.from({ length: period === 4 && hasThirdProctor4 ? 3 : 2 }, (_, i) => { const pos = i + 1; const assignment = assignments.find(a => a.position === pos); const proctor = assignment ? proctorMap.get(assignment.proctorId) : undefined; const cellKey = `${period}:${room.name}:${pos}`; const cellStyle = proctor ? `background-color: ${proctor.gender === Gender.Male ? '#E0F2F1' : '#FCE4EC'}; color: ${proctor.gender === Gender.Male ? '#004D40' : '#880E4F'};` : ''; return `<td class="p-0 border border-gray-200 align-top w-[160px] whitespace-nowrap ${highlightedCells.has(cellKey) ? 'outline outline-2 outline-red-500' : ''} ${proctor ? 'cursor-grab' : ''}" draggable="${!!proctor}" data-period="${period}" data-room="${room.name}" data-pos="${pos}" data-pid="${proctor?.id || ''}"><div class="proctor-cell h-full rounded-sm border border-transparent shadow-sm" style="${cellStyle}">${proctor ? `<div class="group relative p-1 text-center h-full flex flex-col justify-center leading-tight"><div class="font-bold text-sm">${proctor.name}</div><div class="text-xs">(${proctor.school})</div><button data-period="${period}" data-room="${room.name}" data-pos="${pos}" class="screen-only absolute top-1 right-1 bg-red-500 text-white rounded-full w-4 h-4 flex items-center justify-center text-xs opacity-0 group-hover:opacity-100">&times;</button></div>` : `<div data-period="${period}" data-room="${room.name}" data-pos="${pos}" class="p-1 h-full flex items-center justify-center text-gray-400 hover:bg-green-100 cursor-pointer">+ 배정</div>`}</div></td>`; }).join('') }).join('')}</tr>`).join('')}</tbody></table>`; }
+        function ProctorSelectionModal() { if (!state.isModalOpen || !state.targetSlot) return ''; const { targetSlot, schedule, proctors } = state; const assignedInPeriod = new Set(); schedule.forEach((assignments, key) => { if (key.startsWith(`${targetSlot.period}:`)) assignments.forEach(a => assignedInPeriod.add(a.proctorId)); }); const available = proctors.filter(p => !assignedInPeriod.has(p.id) && (targetSlot.position !== 1 || p.schoolLevel === SchoolLevel.High)); return `<div id="modal-backdrop" class="fixed inset-0 bg-black bg-opacity-50 z-50 flex justify-center items-center"><div class="bg-white rounded-lg shadow-xl w-full max-w-md max-h-[80vh] flex flex-col"><div class="p-4 border-b"><h3 class="text-lg font-semibold">감독관 선택: ${targetSlot.period}교시 ${targetSlot.roomName} (제${targetSlot.position}감독)</h3></div><div class="overflow-y-auto p-4"><ul class="divide-y">${available.map(p => `<li data-id="${p.id}" class="p-3 hover:bg-blue-50 cursor-pointer flex justify-between"><div><p class="font-semibold">${p.name} <span class="font-normal text-gray-500">(${p.school})</span></p><p class="text-sm text-gray-600">${p.gender}, ${p.birthYear}년생, ${p.schoolLevel}</p></div><button class="text-sm bg-blue-500 text-white py-1 px-3 rounded">선택</button></li>`).join('')}</ul></div><div class="p-4 border-t text-right"><button id="modal-close-btn" class="bg-gray-200 py-2 px-4 rounded-lg">닫기</button></div></div></div>`; }
+
+        // --- Event Listeners and Handlers ---
+        function attachEventListeners() {
+            document.getElementById('back-btn')?.addEventListener('click', handleBack);
+            if (state.step === AppStep.InitialSetup) {
+                document.getElementById('setup-complete-btn').addEventListener('click', handleSetupComplete);
+                document.querySelectorAll('#step-container input').forEach(i => i.addEventListener('input', handleInitialInfoChange));
+            } else if (state.step === AppStep.Upload) {
+                document.getElementById('proctor-card').addEventListener('click', () => document.getElementById('proctor-input').click());
+                document.getElementById('room-card').addEventListener('click', () => document.getElementById('room-input').click());
+                document.getElementById('proctor-input').addEventListener('change', (e) => handleFileSelect(e, 'proctor'));
+                document.getElementById('room-input').addEventListener('change', (e) => handleFileSelect(e, 'room'));
+                document.getElementById('files-upload-btn').addEventListener('click', handleFilesUpload);
+            } else if (state.step === AppStep.Setup) {
+                document.getElementById('next-btn').addEventListener('click', handleNext);
+                document.getElementById('proctor-search').addEventListener('input', (e) => setState({ proctorSearchTerm: e.target.value }));
+                document.querySelectorAll('[data-sortkey]').forEach(th => th.addEventListener('click', (e) => handleSort(e, 'proctor')));
+                document.querySelectorAll('.proctor-update-input').forEach(i => i.addEventListener('change', handleProctorUpdate));
+            } else if (state.step === AppStep.ManualAssignment) {
+                document.getElementById('generate-btn').addEventListener('click', handleGenerateSchedule);
+                document.getElementById('manual-search').addEventListener('input', (e) => setState({ manualSearchTerm: e.target.value }));
+                document.querySelectorAll('[data-sortkey]').forEach(th => th.addEventListener('click', (e) => handleSort(e, 'manual')));
+                document.querySelectorAll('div[data-id]').forEach(b => b.addEventListener('click', handleToggleAssignment));
+            } else if (state.step === AppStep.Result) {
+                document.getElementById('highlight-pair-btn').addEventListener('click', () => handleHighlight('pair'));
+                document.getElementById('highlight-room-btn').addEventListener('click', () => handleHighlight('room'));
+                document.getElementById('regenerate-btn').addEventListener('click', handleGenerateSchedule);
+                document.getElementById('reset-btn').addEventListener('click', handleReset);
+                document.getElementById('print-btn').addEventListener('click', handlePrint);
+                document.getElementById('export-btn').addEventListener('click', handleExport);
+                document.getElementById('modal-backdrop')?.addEventListener('click', () => setState({ isModalOpen: false }));
+                document.getElementById('modal-close-btn')?.addEventListener('click', () => setState({ isModalOpen: false }));
+                document.querySelector('#modal-backdrop > div')?.addEventListener('click', e => e.stopPropagation());
+                document.querySelectorAll('#modal-backdrop li').forEach(li => li.addEventListener('click', (e) => handleProctorSelect(e.currentTarget.dataset.id)));
+                document.querySelectorAll('td[draggable="true"]').forEach(td => {
+                    td.addEventListener('dragstart', handleDragStart);
+                    td.addEventListener('dragover', handleDragOver);
+                    td.addEventListener('dragleave', handleDragLeave);
+                    td.addEventListener('drop', handleDrop);
+                    td.addEventListener('dragend', handleDragEnd);
+                });
+                document.querySelectorAll('td div[data-period]').forEach(div => div.addEventListener('click', (e) => { const { period, room, pos } = e.currentTarget.dataset; if (e.target.tagName !== 'BUTTON') handleOpenModal(period, room, pos); }));
+                document.querySelectorAll('td button[data-period]').forEach(btn => btn.addEventListener('click', (e) => { e.stopPropagation(); const { period, room, pos } = e.currentTarget.dataset; handleDeleteAssignment(period, room, pos); }));
+            }
+        }
+        function handleInitialInfoChange(e) { const { name, value } = e.target; const newInfo = { ...state.examInfo, [name]: value }; state.examInfo = newInfo; document.getElementById('setup-complete-btn').disabled = !Object.values(newInfo).every(Boolean); }
+        function handleSetupComplete() { if (Object.values(state.examInfo).every(Boolean)) setState({ step: AppStep.Upload }); }
+        function handleFileSelect(e, type) { if (e.target.files.length > 0) { if (type === 'proctor') proctorFile = e.target.files[0]; else roomFile = e.target.files[0]; render(); } }
+        async function handleFilesUpload() { if (!proctorFile || !roomFile) return alert('두 개의 파일을 모두 업로드해주세요.'); setState({ isLoading: true }); try { const readFile = (f) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsText(f, 'UTF-8'); }); const [pText, rText] = await Promise.all([readFile(proctorFile), readFile(roomFile)]); const rooms = parseExamRoomsCSV(rText); const proctors = parseProctorsCSV(pText); const slots = rooms.reduce((a, c) => a + c.requiredProctors.reduce((x, y) => x + y, 0), 0); const avg = proctors.length > 0 ? Math.round(slots / proctors.length) : 0; setState({ examRooms: rooms, proctors: proctors.map(p => ({ ...p, targetSessions: avg, manualAssignments: []})), step: AppStep.Setup, isLoading: false }); } catch (err) { console.error("File processing error:", err); alert("파일 처리 중 오류 발생"); setState({ isLoading: false }); } }
+        function handleBack() { if (state.step > AppStep.InitialSetup) setState({ step: state.step - 1, generationLogs: [] }); }
+        function handleNext() { if (state.step < AppStep.Result) setState({ step: state.step + 1 }); }
+        function handleSort(e, type) { const key = e.currentTarget.dataset.sortkey; const stateKey = `${type}SortKey`; const stateDir = `${type}SortDirection`; if (state[stateKey] === key) { setState({ [stateDir]: state[stateDir] === 'asc' ? 'desc' : 'asc' }); } else { setState({ [stateKey]: key, [stateDir]: 'asc' }); } }
+        function handleProctorUpdate(e) { const { id, field } = e.target.dataset; const value = e.target.type === 'number' ? parseInt(e.target.value) || 0 : e.target.value; const updatedProctors = state.proctors.map(p => p.id === parseInt(id) ? { ...p, [field]: value } : p); state.proctors = updatedProctors; render(); }
+        function handleToggleAssignment(e) { const { id, period, pos } = e.currentTarget.dataset; const proctorId = parseInt(id); const periodNum = parseInt(period); const posNum = parseInt(pos); let proctor = state.proctors.find(p => p.id === proctorId); let assignments = proctor.manualAssignments || []; const existingIndex = assignments.findIndex(a => a.period === periodNum && a.position === posNum); if (existingIndex > -1) { assignments.splice(existingIndex, 1); } else { assignments = assignments.filter(a => a.period !== periodNum); assignments.push({ period: periodNum, position: posNum }); } const updatedProctors = state.proctors.map(p => p.id === proctorId ? { ...p, manualAssignments: assignments, targetSessions: assignments.length } : p); setState({ proctors: updatedProctors }); }
+        async function handleGenerateSchedule() { setState({ isLoading: true, generationLogs: [] }); try { const result = await runAssignmentAlgorithm(state.proctors, state.examRooms, (log) => { state.generationLogs.push(log); if (log.generation % 20 === 0) render(); }); setState({ schedule: result, step: AppStep.Result, isLoading: false }); } catch (error) { console.error("Failed to generate schedule:", error); alert(`시간표 생성 중 오류 발생: ${error.message}`); setState({ isLoading: false }); } }
+        function handleReset() { if (confirm('정말로 처음부터 다시 시작하시겠습니까?')) { proctorFile = null; roomFile = null; setState({ step: AppStep.InitialSetup, proctors: [], examRooms: [], schedule: null, examInfo: { year: String(new Date().getFullYear() + 1), district: '', center: '', school: '' } }); } }
+        function handleHighlight(type) { if (state.highlightType === type) return setState({ highlightType: 'none', highlightedCells: new Set() }); const newCells = new Set(); if (type === 'pair') { const pairs = new Map(); state.schedule.forEach((assigns, key) => { if (assigns.length < 2) return; const [p, r] = key.split(':'); const ids = assigns.map(a => a.proctorId).sort(); for (let i = 0; i < ids.length; i++) for (let j = i + 1; j < ids.length; j++) { const pairKey = `${ids[i]}-${ids[j]}`; if (!pairs.has(pairKey)) pairs.set(pairKey, []); pairs.get(pairKey).push(assigns.map(a => `${p}:${r}:${a.position}`)); } }); pairs.forEach(locs => { if (locs.length > 2) locs.flat().forEach(l => newCells.add(l)); }); } else if (type === 'room') { const rooms = new Map(); state.schedule.forEach((assigns, key) => { const [p, r] = key.split(':'); assigns.forEach(a => { if (!rooms.has(a.proctorId)) rooms.set(a.proctorId, new Map()); if (!rooms.get(a.proctorId).has(r)) rooms.get(a.proctorId).set(r, []); rooms.get(a.proctorId).get(r).push(`${p}:${r}:${a.position}`); }); }); rooms.forEach(roomMap => roomMap.forEach(locs => { if (locs.length > 1) locs.forEach(l => newCells.add(l)); })); } setState({ highlightType: type, highlightedCells: newCells }); }
+        function handleDeleteAssignment(p, r, pos) { const newSchedule = new Map(JSON.parse(JSON.stringify(Array.from(state.schedule)))); const key = `${p}:${r}`; const assigns = (newSchedule.get(key) || []).filter(a => a.position !== parseInt(pos)); newSchedule.set(key, assigns); setState({ schedule: newSchedule }); }
+        function handleOpenModal(p, r, pos) { setState({ isModalOpen: true, targetSlot: { period: parseInt(p), roomName: r, position: parseInt(pos) } }); }
+        function handleProctorSelect(pid) { const { targetSlot, schedule } = state; const proctorId = parseInt(pid); if (!targetSlot) return; const newSchedule = new Map(JSON.parse(JSON.stringify(Array.from(schedule)))); const key = `${targetSlot.period}:${targetSlot.roomName}`; const assigns = (newSchedule.get(key) || []).filter(a => a.position !== targetSlot.position); assigns.push({ proctorId, position: targetSlot.position }); assigns.sort((a, b) => a.position - b.position); newSchedule.set(key, assigns); setState({ schedule: newSchedule, isModalOpen: false }); }
+        function handleDragStart(e) { const { period, room, pos, pid } = e.currentTarget.dataset; state.draggedItem = { period: parseInt(period), roomName: room, position: parseInt(pos), proctorId: parseInt(pid) }; e.dataTransfer.effectAllowed = 'move'; e.currentTarget.classList.add('dragging'); }
+        function handleDragOver(e) { e.preventDefault(); if (state.draggedItem && parseInt(e.currentTarget.dataset.period) === state.draggedItem.period) { e.dataTransfer.dropEffect = 'move'; e.currentTarget.classList.add('drop-target'); } else { e.dataTransfer.dropEffect = 'none'; } }
+        function handleDragLeave(e) { e.currentTarget.classList.remove('drop-target'); }
+        function handleDrop(e) { e.preventDefault(); e.currentTarget.classList.remove('drop-target'); const { draggedItem, proctors, schedule } = state; const { period, room, pos, pid } = e.currentTarget.dataset; if (!draggedItem || draggedItem.period !== parseInt(period)) return; const sourceProctor = proctors.find(p => p.id === draggedItem.proctorId); const targetProctorId = pid ? parseInt(pid) : undefined; if (draggedItem.proctorId === targetProctorId) return; const newSchedule = new Map(JSON.parse(JSON.stringify(Array.from(schedule)))); if (targetProctorId) { const targetProctor = proctors.find(p => p.id === targetProctorId); if ((draggedItem.position === 1 && targetProctor.schoolLevel !== SchoolLevel.High) || (parseInt(pos) === 1 && sourceProctor.schoolLevel !== SchoolLevel.High)) return alert('1감독은 고등학교 교사만 가능합니다.'); const sourceKey = `${draggedItem.period}:${draggedItem.roomName}`; const targetKey = `${period}:${room}`; const sourceAssigns = newSchedule.get(sourceKey).map(a => a.position === draggedItem.position ? { ...a, proctorId: targetProctorId } : a); const targetAssigns = newSchedule.get(targetKey).map(a => a.position === parseInt(pos) ? { ...a, proctorId: draggedItem.proctorId } : a); newSchedule.set(sourceKey, sourceAssigns); newSchedule.set(targetKey, targetAssigns); } else { if (parseInt(pos) === 1 && sourceProctor.schoolLevel !== SchoolLevel.High) return alert('1감독은 고등학교 교사만 가능합니다.'); const sourceKey = `${draggedItem.period}:${draggedItem.roomName}`; const targetKey = `${period}:${room}`; const sourceAssigns = newSchedule.get(sourceKey).filter(a => a.position !== draggedItem.position); const targetAssigns = newSchedule.get(targetKey) || []; targetAssigns.push({ proctorId: draggedItem.proctorId, position: parseInt(pos) }); targetAssigns.sort((a,b) => a.position - b.position); newSchedule.set(sourceKey, sourceAssigns); newSchedule.set(targetKey, targetAssigns); } setState({ schedule: newSchedule }); }
+        function handleDragEnd(e) { e.currentTarget.classList.remove('dragging'); state.draggedItem = null; }
+        function handleExport() { const { examInfo, schedule, proctors, examRooms } = state; const proctorMap = new Map(proctors.map(p => [p.id, p])); const maxPeriods = Math.max(...examRooms.flatMap(r => r.requiredProctors.map((c, i) => c > 0 ? i + 1 : 0))); const hasThird = examRooms.some(r => r.requiredProctors[3] > 2); let csv = "\uFEFF"; csv += `"${examInfo.year}학년도 대학수학능력시험 시험실 감독관 명단"\r\n`; csv += `"제 ${examInfo.district} 시험지구 (${examInfo.center})시험장 (${examInfo.school})"\r\n\r\n`; const headers = ["시험실 번호"]; for (let p = 1; p <= maxPeriods; p++) { headers.push(`제${p}교시 제1감독관`, `제${p}교시 제2감독관`); if (p === 4 && hasThird) headers.push(`제${p}교시 제3감독관`); } csv += headers.join(',') + '\r\n'; examRooms.forEach(room => { const row = [`"${room.name}"`]; for (let p = 1; p <= maxPeriods; p++) { const assigns = schedule.get(`${p}:${room.name}`) || []; const p1 = assigns.find(a => a.position === 1); const p2 = assigns.find(a => a.position === 2); const getName = (assign) => assign ? `${proctorMap.get(assign.proctorId)?.name}(${proctorMap.get(assign.proctorId)?.school})` : ""; row.push(`"${getName(p1)}"`, `"${getName(p2)}"`); if (p === 4 && hasThird) { const p3 = assigns.find(a => a.position === 3); row.push(`"${getName(p3)}"`); } } csv += row.join(',') + '\r\n'; }); const link = document.createElement("a"); link.setAttribute("href", 'data:text/csv;charset=utf-8,' + encodeURI(csv)); link.setAttribute("download", "proctor_schedule.csv"); document.body.appendChild(link); link.click(); document.body.removeChild(link); }
+        function handlePrint() {
+            const { examInfo } = state;
+            const tableHTML = document.querySelector('.overflow-x-auto')?.innerHTML;
+            if (!tableHTML) { alert("인쇄할 시간표를 찾을 수 없습니다."); return; }
+
+            const win = window.open('', '', 'height=800,width=1200');
+            
+            const styles = `
+                <style>
+                    @media print { @page { size: A4 landscape; margin: 0.8cm; } }
+                    body { font-family: 'Malgun Gothic', sans-serif; -webkit-print-color-adjust: exact !important; color-adjust: exact !important; }
+                    .print-title { text-align: center; margin-bottom: 16px; }
+                    .print-title h1 { font-size: 16pt; font-weight: bold; margin: 0; }
+                    .print-title p { font-size: 12pt; margin: 4px 0 0 0; }
+                    table { width: 100%; border-collapse: collapse; }
+                    th, td { border: 1px solid #d1d5db !important; padding: 0 !important; text-align: center !important; vertical-align: middle !important; white-space: nowrap !important; }
+                    thead { display: table-header-group; }
+                    th { font-weight: bold !important; font-size: 9pt !important; background-color: #f9fafb !important; padding: 2px 4px !important; }
+                    tr, td { background-color: transparent !important; }
+                    tbody tr td:first-child { font-weight: bold !important; font-size: 9pt !important; background-color: #f9fafb !important; }
+                    .proctor-cell { -webkit-print-color-adjust: exact !important; color-adjust: exact !important; border-radius: 0.125rem !important; border-width: 1px !important; box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05) !important; padding: 4px 0 !important; }
+                    .font-bold { font-weight: 700 !important; font-size: 8pt !important; }
+                    .text-xs { font-size: 7pt !important; }
+                    .leading-tight { line-height: 1.25 !important; }
+                    button { display: none !important; }
+                    .screen-only { display: none !important; }
+                </style>
+            `;
+
+            win.document.write(`<html><head><title>최종 감독 시간표 인쇄</title>${styles}</head><body>`);
+            win.document.write(`<div class="print-title"><h1>${examInfo.year}학년도 대학수학능력시험 시험실 감독관 명단</h1><p>제 ${examInfo.district} 시험지구 (${examInfo.center})시험장 (${examInfo.school})</p></div>`);
+            win.document.write(tableHTML);
+            win.document.write('</body></html>');
+            win.document.close();
+            setTimeout(() => { win.focus(); win.print(); win.close(); }, 250);
+        }
+
+        // --- CSV Parsers ---
+        function parseProctorsCSV(csvText) { const lines = csvText.trim().split('\n'); const headerIndex = lines.findIndex(l => l.startsWith('순') || l.startsWith('"순"')); if (headerIndex === -1) return []; return lines.slice(headerIndex + 1).map(l => { const cols = l.split(','); if (cols.length < 6 || !cols[0].trim()) return null; const by = parseInt(cols[4].trim()) || 0; return { id: parseInt(cols[0].trim()) || 0, name: cols[2].trim(), school: cols[1].trim(), gender: cols[3].includes('남') ? Gender.Male : Gender.Female, birthYear: by > 50 ? 1900 + by : 2000 + by, schoolLevel: cols[5].includes('고') ? SchoolLevel.High : SchoolLevel.Middle, category: (cols[6] || '').trim(), manualAssignments: [] }; }).filter(Boolean); }
+        function parseExamRoomsCSV(csvText) { const lines = csvText.trim().split('\n'); const headerIndex = lines.findIndex(l => l.toLowerCase().includes('1교시')); if (headerIndex === -1) return []; return lines.slice(headerIndex + 1).map(l => { const cols = l.split(','); if (cols.length < 2 || !cols[0] || cols[0].trim().startsWith('합')) return null; return { name: cols[0].trim(), requiredProctors: [1, 2, 3, 4, 5].map(i => parseInt(cols[i] || '0', 10)) }; }).filter(Boolean); }
+
+        // --- Assignment Algorithm (from assignmentService.ts) ---
+        function runAssignmentAlgorithm(initialProctors, examRooms, logCallback) {
+            return new Promise((resolve, reject) => {
+                const proctors = initialProctors;
+                const POPULATION_SIZE = 200, NUM_GENERATIONS = 400, TOURNAMENT_SIZE = 5, MUTATION_RATE = 0.1, CROSSOVER_RATE = 0.8;
+                const UNBREAKABLE_CONSTRAINT_PENALTY = 100000;
+
+                const createSlots = (examRooms) => {
+                    const slots = [];
+                    examRooms.forEach(room => { room.requiredProctors.forEach((count, periodIndex) => { for (let i = 0; i < count; i++) { const slot = { period: periodIndex + 1, roomName: room.name, position: i + 1, }; if (slot.position === 1) slot.requiredLevel = SchoolLevel.High; slots.push(slot); } }); });
+                    return slots.sort((a, b) => a.period - b.period || a.roomName.localeCompare(b.roomName) || a.position - b.position);
+                };
+                
+                const slots = createSlots(examRooms);
+                const proctorMap = new Map(proctors.map(p => [p.id, p]));
+
+                if (proctors.length === 0 || slots.length === 0) return reject(new Error("감독관 또는 시험실 정보가 없습니다."));
+                
+                const createIndividual = () => {
+                    const individual = new Map();
+                    const highSchoolProctors = proctors.filter(p => p.schoolLevel === SchoolLevel.High);
+                    const proctorsAssignedInPeriod = Array.from({ length: 6 }, () => new Set());
+                    const proctorRoomAssignments = new Map(); const proctorPairs = new Set();
+                    const assignProctor = (slot, proctorId) => {
+                        const { period, roomName, position } = slot;
+                        const key = `${period}:${roomName}`;
+                        const existingAssignments = individual.get(key) || [];
+                        if (!proctorRoomAssignments.has(proctorId)) proctorRoomAssignments.set(proctorId, new Set());
+                        proctorRoomAssignments.get(proctorId).add(roomName);
+                        for (const existing of existingAssignments) {
+                            const pairKey = [proctorId, existing.proctorId].sort((a, b) => a - b).join('-');
+                            proctorPairs.add(pairKey);
+                        }
+                        const newAssignments = [...existingAssignments, { proctorId, position }];
+                        newAssignments.sort((a, b) => a.position - b.position);
+                        individual.set(key, newAssignments);
+                        proctorsAssignedInPeriod[period].add(proctorId);
+                    };
+                    let unassignedSlots = [...slots];
+                    proctors.forEach(proctor => {
+                        proctor.manualAssignments?.forEach(manual => {
+                            const slotIndex = unassignedSlots.findIndex(slot => slot.period === manual.period && ((manual.position === 1 && slot.position === 1) || (manual.position > 1 && slot.position > 1)) && !proctorsAssignedInPeriod[manual.period].has(proctor.id) && !(slot.position === 1 && proctor.schoolLevel !== SchoolLevel.High) );
+                            if (slotIndex > -1) { const [slotToAssign] = unassignedSlots.splice(slotIndex, 1); assignProctor(slotToAssign, proctor.id); }
+                        });
+                    });
+                    for (const slot of unassignedSlots) {
+                        const { period, roomName, requiredLevel } = slot;
+                        const availableProctors = proctors.filter(p => !proctorsAssignedInPeriod[period].has(p.id) && (!requiredLevel || p.schoolLevel === requiredLevel));
+                        if (availableProctors.length > 0) {
+                            const existingAssignmentsInSlot = individual.get(`${period}:${roomName}`) || [];
+                            const scoredProctors = availableProctors.map(p => {
+                                let score = 0;
+                                if (proctorRoomAssignments.get(p.id)?.has(roomName)) score++;
+                                for (const existing of existingAssignmentsInSlot) { const pairKey = [p.id, existing.proctorId].sort((a, b) => a - b).join('-'); if (proctorPairs.has(pairKey)) score++; }
+                                if ([1, 2, 3].includes(period)) { for (const existing of existingAssignmentsInSlot) { const existingProctor = proctorMap.get(existing.proctorId); if (existingProctor && existingProctor.school === p.school) score++; } }
+                                return { proctor: p, score };
+                            }).sort((a, b) => a.score - b.score);
+                            const bestScore = scoredProctors[0].score;
+                            const bestProctors = scoredProctors.filter(p => p.score === bestScore);
+                            const chosenProctor = bestProctors[Math.floor(Math.random() * bestProctors.length)].proctor;
+                            assignProctor(slot, chosenProctor.id);
+                        } else {
+                            let fallbackPool = requiredLevel === SchoolLevel.High ? highSchoolProctors : proctors;
+                            if (fallbackPool.length === 0) fallbackPool = proctors;
+                            if (fallbackPool.length > 0) { const randomProctor = fallbackPool[Math.floor(Math.random() * fallbackPool.length)]; assignProctor(slot, randomProctor.id); }
+                        }
+                    }
+                    return individual;
+                };
+                const calculateFitness = (chromosome) => {
+                    let hardViolations = 0;
+                    for (let period = 1; period <= 5; period++) {
+                        const proctorsThisPeriod = new Map();
+                        for (const [key, assignments] of chromosome.entries()) { if (key.startsWith(`${period}:`)) { for (const assignment of assignments) proctorsThisPeriod.set(assignment.proctorId, (proctorsThisPeriod.get(assignment.proctorId) || 0) + 1); } }
+                        for (const count of proctorsThisPeriod.values()) if (count > 1) hardViolations += (count - 1);
+                    }
+                    for (const [, assignments] of chromosome.entries()) { if (!assignments || assignments.length < 1) continue; for (const assignment of assignments) { const proctor = proctorMap.get(assignment.proctorId); if (assignment.position === 1 && proctor && proctor.schoolLevel !== SchoolLevel.High) hardViolations++; } }
+                    for (const proctor of proctors) {
+                        if (proctor.manualAssignments?.length > 0) {
+                            for (const manual of proctor.manualAssignments) {
+                                let isMet = false;
+                                for (const [key, assignments] of chromosome.entries()) { if (key.startsWith(`${manual.period}:`)) { if (assignments.some(a => a.proctorId === proctor.id && ((manual.position === 1 && a.position === 1) || (manual.position > 1 && a.position > 1)))) { isMet = true; break; } } }
+                                if (!isMet) hardViolations++;
+                            }
+                        }
+                    }
+                    const proctorRoomCounts = new Map(), pairCounts = new Map();
+                    for (const [key, assignments] of chromosome.entries()) {
+                        const [periodStr, roomName] = key.split(':'); const period = parseInt(periodStr, 10);
+                        if ([1, 2, 3].includes(period) && assignments.length >= 2) { for (let i = 0; i < assignments.length; i++) { for (let j = i + 1; j < assignments.length; j++) { const p1 = proctorMap.get(assignments[i].proctorId), p2 = proctorMap.get(assignments[j].proctorId); if (p1 && p2 && p1.school === p2.school) hardViolations++; } } }
+                        for (const { proctorId } of assignments) { if (!proctorRoomCounts.has(proctorId)) proctorRoomCounts.set(proctorId, new Map()); const roomMap = proctorRoomCounts.get(proctorId); roomMap.set(roomName, (roomMap.get(roomName) || 0) + 1); }
+                        if (assignments.length >= 2) { const ids = assignments.map(a => a.proctorId).sort((a, b) => a - b); for (let i = 0; i < ids.length; i++) { for (let j = i + 1; j < ids.length; j++) { const pairKey = `${ids[i]}-${ids[j]}`; pairCounts.set(pairKey, (pairCounts.get(pairKey) || 0) + 1); } } }
+                    }
+                    for (const roomMap of proctorRoomCounts.values()) for (const count of roomMap.values()) if (count > 1) hardViolations += (count - 1);
+                    for (const count of pairCounts.values()) if (count > 1) hardViolations += (count - 1);
+                    return hardViolations * UNBREAKABLE_CONSTRAINT_PENALTY;
+                };
+                const tournamentSelection = (population, fitnesses) => {
+                    let bestIndex = Math.floor(Math.random() * population.length);
+                    for (let i = 1; i < TOURNAMENT_SIZE; i++) { const randomIndex = Math.floor(Math.random() * population.length); if (fitnesses[randomIndex] < fitnesses[bestIndex]) bestIndex = randomIndex; }
+                    return population[bestIndex];
+                };
+                const crossover = (p1, p2) => {
+                    const c1 = new Map(JSON.parse(JSON.stringify(Array.from(p1)))); const c2 = new Map(JSON.parse(JSON.stringify(Array.from(p2))));
+                    const periods = [...new Set(slots.map(s => s.period))]; if (periods.length === 0) return [c1, c2];
+                    const periodToSwap = periods[Math.floor(Math.random() * periods.length)];
+                    const keysInPeriod = [...new Set(slots.filter(s => s.period === periodToSwap).map(s => `${s.period}:${s.roomName}`))];
+                    for (const key of keysInPeriod) {
+                        const a1 = p1.get(key), a2 = p2.get(key);
+                        if (a2) c1.set(key, JSON.parse(JSON.stringify(a2))); else c1.delete(key);
+                        if (a1) c2.set(key, JSON.parse(JSON.stringify(a1))); else c2.delete(key);
+                    }
+                    return [c1, c2];
+                };
+                const mutate = (chromosome) => {
+                    if (Math.random() >= MUTATION_RATE) return;
+                    const periods = [...new Set(slots.map(s => s.period))]; if (periods.length < 1) return;
+                    const period = periods[Math.floor(Math.random() * periods.length)];
+                    const slotsInPeriod = slots.filter(s => s.period === period); if (slotsInPeriod.length < 2) return;
+                    const i1 = Math.floor(Math.random() * slotsInPeriod.length); let i2 = Math.floor(Math.random() * slotsInPeriod.length);
+                    while (i1 === i2) i2 = Math.floor(Math.random() * slotsInPeriod.length);
+                    const s1 = slotsInPeriod[i1], s2 = slotsInPeriod[i2];
+                    const a1 = chromosome.get(`${s1.period}:${s1.roomName}`), a2 = chromosome.get(`${s2.period}:${s2.roomName}`);
+                    if (!a1 || !a2) return;
+                    const ai1 = a1.findIndex(a => a.position === s1.position), ai2 = a2.findIndex(a => a.position === s2.position);
+                    if (ai1 === -1 || ai2 === -1) return;
+                    const pId1 = a1[ai1].proctorId, pId2 = a2[ai2].proctorId;
+                    if (pId1 === pId2) return;
+                    const p1 = proctorMap.get(pId1), p2 = proctorMap.get(pId2);
+                    if (!p1 || !p2) return;
+                    if ((s1.position === 1 && p2.schoolLevel !== SchoolLevel.High) || (s2.position === 1 && p1.schoolLevel !== SchoolLevel.High)) return;
+                    a1[ai1].proctorId = pId2; a2[ai2].proctorId = pId1;
+                };
+                let population = Array.from({ length: POPULATION_SIZE }, () => createIndividual());
+                let bestIndividualEver = population[0], bestFitnessEver = calculateFitness(bestIndividualEver);
+                const runGeneration = (gen) => {
+                    if (gen > NUM_GENERATIONS) {
+                        if (bestFitnessEver >= UNBREAKABLE_CONSTRAINT_PENALTY) reject(new Error("규칙을 모두 만족하는 시간표를 찾지 못했습니다. 수동 배정 등을 확인해주세요."));
+                        else resolve(bestIndividualEver);
+                        return;
+                    }
+                    const fitnesses = population.map(ind => calculateFitness(ind));
+                    const bestCurrentIndex = fitnesses.indexOf(Math.min(...fitnesses));
+                    if (fitnesses[bestCurrentIndex] < bestFitnessEver) { bestFitnessEver = fitnesses[bestCurrentIndex]; bestIndividualEver = population[bestCurrentIndex]; }
+                    logCallback({ generation: gen, bestScore: bestFitnessEver, averageScore: fitnesses.reduce((a, b) => a + b, 0) / fitnesses.length });
+                    if (bestFitnessEver === 0) { resolve(bestIndividualEver); return; }
+                    const newPopulation = [bestIndividualEver];
+                    while (newPopulation.length < POPULATION_SIZE) {
+                        const parent1 = tournamentSelection(population, fitnesses), parent2 = tournamentSelection(population, fitnesses);
+                        if (Math.random() < CROSSOVER_RATE) { let [c1, c2] = crossover(parent1, parent2); mutate(c1); mutate(c2); newPopulation.push(c1, c2); } 
+                        else { newPopulation.push(parent1, parent2); }
+                    }
+                    population = newPopulation.slice(0, POPULATION_SIZE);
+                    setTimeout(() => runGeneration(gen + 1), 0);
+                };
+                runGeneration(1);
+            });
+        }
+        
+        // --- Initial Render ---
+        render();
+    </script>
+</body>
+</html>
